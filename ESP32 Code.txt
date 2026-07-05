@@ -1,0 +1,165 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HardwareSerial.h>
+#include <DFRobotDFPlayerMini.h>
+
+// We use the these  pins of the esp32 
+#define TRIG 5
+#define ECHO 18
+#define BUZZER 4
+#define LED 2
+#define RX_PIN 16
+#define TX_PIN 17
+
+HardwareSerial mySerial(2);
+DFRobotDFPlayerMini player;
+WebServer server(80); 
+
+//  WIFI CONFIG 
+const char* ssid = "vivo";
+const char* password = "amir1111";
+
+unsigned long lastWiFiTime = 0;
+bool isOffline = false;
+
+
+//  FUNCTION PROTOTYPES (The Fix for PlatformIO)
+
+void handlePlayRequest();
+void runOfflineMode();
+
+
+void setup() {
+  Serial.begin(115200);
+  mySerial.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
+  
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+  pinMode(BUZZER, OUTPUT);
+  pinMode(LED, OUTPUT);
+  
+  digitalWrite(BUZZER, LOW);
+  digitalWrite(LED, LOW);
+
+  Serial.println("\n=========================================");
+  Serial.println("  🔊 Smart Stick AI AUDIO CONTROLLER BOOTING");
+  Serial.println("=========================================");
+
+  // Initialize DFPlayer
+  if (!player.begin(mySerial)) {
+    Serial.println("[ERROR] DFPlayer Mini NOT found! Check TX/RX wiring.");
+  } else {
+    player.volume(25); // Set volume to 25
+    Serial.println("[INFO]  DFPlayer Mini Ready.");
+    player.play(1); // System ON voice (0001.mp3)
+    delay(7000);
+    player.play(2); // Ready voice (0002.mp3)
+  }
+
+  // Connect to WiFi
+  Serial.print("[INFO]  Connecting to WiFi: ");
+  Serial.print(ssid);
+  WiFi.begin(ssid, password);
+  
+  int retries = 0;
+  while (WiFi.status() != WL_CONNECTED && retries < 20) {
+    delay(500); 
+    Serial.print(".");
+    retries++;
+  }
+  
+  if(WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[INFO]  WiFi Connected!");
+    Serial.print("[INFO]  IP Address: ");
+    Serial.println(WiFi.localIP());
+    
+    // Setup the /play endpoint
+    server.on("/play", HTTP_GET, handlePlayRequest);
+    server.begin();
+    Serial.println("[INFO]  HTTP Server Started. Listening for AI Detections...");
+  } else {
+    Serial.println("\n[WARN]  WiFi Failed. Starting in Offline Mode.");
+    isOffline = true;
+  }
+  Serial.println("=========================================\n");
+}
+
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (isOffline) {
+       Serial.println("[INFO]  WiFi Restored. Resuming AI Web Server.");
+       Serial.println("\n[INFO]  WiFi Connected!");
+       Serial.print("[INFO]  IP Address: ");
+       Serial.println(WiFi.localIP());
+       isOffline = false;
+    }
+    lastWiFiTime = millis();
+    server.handleClient(); // Process incoming requests from Python
+  } else if (millis() - lastWiFiTime > 5000 && !isOffline) {
+    isOffline = true;
+    Serial.println("\n[WARN]  WiFi Connection Lost!");
+    Serial.println("[ALERT] Switching to Offline Ultrasonic Mode.");
+  }
+
+  if (isOffline) {
+    runOfflineMode();
+  }
+}
+
+// --- STREAMLINED HTTP HANDLER ---
+void handlePlayRequest() {
+  // Flash LED to show we received a command from Python
+  digitalWrite(LED, HIGH);
+
+  // Check if Python sent the 'id' parameter (Required to play a sound)
+  if (server.hasArg("id")) {
+    int trackID = server.arg("id").toInt();
+    
+    // Extract Class Name and Confidence (Fallback to defaults if Python didn't send them)
+    String className = server.hasArg("name") ? server.arg("name") : "Unknown";
+    String confidence = server.hasArg("conf") ? server.arg("conf") : "N/A";
+
+    // Play the audio track
+    if (trackID > 0) {
+      player.play(trackID);
+    }
+
+    // Print Clean, Professional Log
+    if (trackID == 83) {
+       Serial.printf("[ALERT]  Confused/Unknown Object | Track: %02d\n", trackID);
+    } else {
+       // %-12s ensures all class names line up perfectly in the monitor
+       Serial.printf("[DETECT] Class: %-12s | Conf: %-4s | Track: %02d\n", 
+                     className.c_str(), confidence.c_str(), trackID);
+    }
+
+    // Tell Python the command was successful so it doesn't freeze
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(400, "text/plain", "Error: Missing Track ID");
+  }
+
+  delay(50); // Brief delay for the LED flash
+  digitalWrite(LED, LOW);
+}
+
+// --- OFFLINE SENSOR LOGIC ---
+void runOfflineMode() {
+  digitalWrite(TRIG, LOW); delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+  
+  long duration = pulseIn(ECHO, HIGH, 30000); // 30ms timeout
+  int distance = duration * 0.034 / 2;
+
+  // If object is closer than 100cm (and reading is valid)
+  if (distance > 0 && distance < 100) {
+    Serial.printf("[ALARM]  Motion Detected! Distance: %d cm\n", distance);
+    digitalWrite(BUZZER, HIGH);
+    delay(1500); // Beep for 1.5 seconds
+    digitalWrite(BUZZER, LOW);
+    delay(500);
+  }
+  
+  delay(100); 
+}
